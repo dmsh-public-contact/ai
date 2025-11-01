@@ -1,0 +1,181 @@
+---
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    # pull_policy: always
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://127.0.0.1:8080 || exit 1
+      interval: 60s
+      retries: 5
+      start_period: 20s
+      timeout: 10s
+    environment:
+      - TZ=Europe/Moscow
+      - SEARXNG_UWSGI_WORKERS=4
+      - SEARXNG_UWSGI_THREADS=4
+    networks:
+      - ollama-docker
+    ports:
+      - 1337:8080
+    volumes:
+      - ./configs/searxng:/etc/searxng:rw
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    # pull_policy: always
+    tty: true
+    healthcheck:
+      test: ollama list || exit 1
+      interval: 60s
+      retries: 5
+      start_period: 20s
+      timeout: 10s
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ 'nvidia.com/gpu=all' ]
+              capabilities:
+                - gpu
+    environment:
+      - TZ=Europe/Moscow
+      - OLLAMA_KEEP_ALIVE=0m
+      # - OLLAMA_NUM_PARALLEL=256
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - CUDA_VISIBLE_DEVICES=0
+    entrypoint: "/usr/local/bin/docker-entrypoint.sh"
+    networks:
+      - ollama-docker
+    ports:
+      - 11434:11434
+    volumes:
+      - ./configs/ollama:/root/.ollama
+      - ./scripts/ollama/docker-entrypoint.sh:/usr/local/bin/docker-entrypoint.sh:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
+    restart: unless-stopped
+  
+  comfyui:
+    build:
+      context: .
+      dockerfile: ./dockerfiles/comfyui.Dockerfile
+    image: dmsh/comfyui:latest
+    container_name: comfyui
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8188 || exit 1
+      interval: 60s
+      retries: 30
+      start_period: 20s
+      timeout: 10s
+    ports:
+      - 8188:8188
+    volumes:
+      - ./scripts/comfyui/docker-entrypoint.sh:/usr/local/bin/docker-entrypoint.sh:ro
+      - ./certs:/etc/certs:ro
+      - ./configs/comfyui/opt:/opt:rw
+      - ./configs/comfyui/.venv:/.venv:rw
+      - ./configs/comfyui/root/.cache/pip:/root/.cache/pip:rw
+    environment:
+      - TZ=Europe/Moscow
+      - USE_HTTPS=no
+      - SECURITY_LEVEL=normal
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+    entrypoint: "/usr/local/bin/docker-entrypoint.sh"
+    networks:
+      - ollama-docker
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ 'nvidia.com/gpu=all' ]
+              capabilities:
+                - gpu
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
+    restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:cuda
+    container_name: open-webui
+    # pull_policy: always
+    healthcheck:
+      test: curl --fail http://localhost:8080 || exit 1
+      interval: 60s
+      retries: 5
+      start_period: 20s
+      timeout: 10s
+    depends_on:
+      ollama:
+        condition: service_healthy
+      comfyui:
+        condition: service_healthy
+      searxng:
+        condition: service_healthy
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ 'nvidia.com/gpu=all' ]
+              capabilities:
+                - gpu
+    environment:
+      - TZ=Europe/Moscow
+      - OLLAMA_BASE_URLS=http://host.docker.internal:11434
+      - ENV=prod
+      - WEBUI_AUTH=True
+      - WEBUI_NAME=AI
+      - WEBUI_URL=http://localhost:8080
+      - WEBUI_SECRET_KEY=AJHSdg6576aSDhasjk
+      - USE_CUDA_DOCKER=True
+      - WHISPER_MODEL=large-v3
+      - ENABLE_RAG_WEB_SEARCH=True
+      - RAG_WEB_SEARCH_ENGINE=searxng
+      - RAG_WEB_SEARCH_RESULT_COUNT=12
+      - RAG_WEB_SEARCH_CONCURRENT_REQUESTS=12
+      - SEARXNG_QUERY_URL=http://host.docker.internal:1337/search?q=<query>
+    networks:
+      - ollama-docker
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - 8080:8080
+    volumes:
+      - ./configs/open-webui:/app/backend/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
+    restart: unless-stopped
+
+networks:
+  ollama-docker:
+    external: false
